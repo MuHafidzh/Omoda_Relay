@@ -59,8 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define BTN_Pin GPIO_PIN_13
 #define BTN_GPIO_Port GPIOC
-#define BUZZ_Pin GPIO_PIN_15
-#define BUZZ_GPIO_Port GPIOC
+#define BUZZ_Pin GPIO_PIN_0
+#define BUZZ_GPIO_Port GPIOA
 #define AC_DET_Pin GPIO_PIN_1
 #define AC_DET_GPIO_Port GPIOA
 #define DC_DET_Pin GPIO_PIN_2
