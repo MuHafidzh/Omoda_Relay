@@ -51,10 +51,11 @@
 GPIO_PinState relay_state = GPIO_PIN_RESET;
 FDCAN_TxHeaderTypeDef TxHeader;
 FDCAN_RxHeaderTypeDef RxHeader;
-uint8_t rx_data[8];
-uint8_t tx_data[8];
+uint8_t rx_data[64];
+uint8_t tx_data[64];
 uint8_t counter_tx;
-uint16_t interval_led = 1000, interval_tx = 10;
+volatile uint16_t interval_led = 1000;
+uint16_t interval_tx = 10;
 uint32_t timer_led, timer_tx;
 
 int main_state = 0;
@@ -101,6 +102,13 @@ bool force_on = false;
 uint16_t adc_val[2];
 uint16_t ac_det = 0, dc_det = 0;
 float ac_voltage = 0, dc_voltage = 0;
+
+volatile uint32_t fdcan_tx_ok = 0;
+volatile uint32_t fdcan_tx_err = 0;
+volatile uint32_t fdcan_bus_off_cnt = 0;
+volatile bool fdcan_need_recover = false;
+volatile bool fdcan_need_start = false;
+static uint8_t fdcan_tx_err_streak = 0; // local helper
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -174,6 +182,16 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
   }
 }
 
+void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t ErrorStatusITs)
+{
+  (void)hfdcan;
+  if ((ErrorStatusITs & FDCAN_IT_BUS_OFF) != 0U)
+  {
+    fdcan_bus_off_cnt++;
+    fdcan_need_recover = true;
+  }
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM6) // timer 1khz
@@ -195,7 +213,22 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       uint8_t crc_ = calculate_crc(tx_data, 4, 0x1D, 0xA);
       tx_data[4] = crc_;
 
-      HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &TxHeader, tx_data);
+      // HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &TxHeader, tx_data);
+      uint32_t free = HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1);
+      if (free > 0)
+      {
+        if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &TxHeader, tx_data) == HAL_OK)
+        {
+          fdcan_tx_ok++;
+          fdcan_tx_err_streak = 0;
+        }
+        else
+        {
+          fdcan_tx_err++;
+          if (++fdcan_tx_err_streak >= 3) // threshold, adjust jika perlu
+            fdcan_need_recover = true;
+        }
+      }
       ctr2 = 0;
     }
   }
@@ -210,9 +243,9 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
@@ -251,7 +284,8 @@ int main(void)
     HAL_GPIO_TogglePin(BUZZ_GPIO_Port, BUZZ_Pin);
     HAL_Delay(100);
   }
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_val, 4);
+  // HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_val, 4);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_val, 2);
   HAL_Delay(100);
 
   HAL_TIM_Base_Start_IT(&htim6);
@@ -367,7 +401,7 @@ int main(void)
     case 3: // Check if AC is on
     {
       send_code = 4;
-      static int ac_det_ctr = 0;
+//      static int ac_det_ctr = 0;
       // if (is_ac_on())
       // {
       //   ac_det_ctr += 1;
@@ -382,7 +416,7 @@ int main(void)
       if (timer_sec > delay_ecoflow_on_s)
       {
         main_state = 4;
-        ac_det_ctr = 0;
+//        ac_det_ctr = 0;
         reset_timer(&last_time, &timer_sec);
       }
 
@@ -464,7 +498,28 @@ int main(void)
       break;
     } /***** END OF CASE *****/
 
+    if (fdcan_need_recover)
+    {
+      fdcan_need_recover = false;
+      fdcan_tx_err_streak = 0;
+
+      HAL_FDCAN_Stop(&hfdcan1);
+      fdcan_need_start = true;
+    }
     HAL_Delay(10);
+    if (fdcan_need_start)
+    {
+      fdcan_need_start = false;
+      if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+      {
+        // jika gagal start ulang, bisa retry atau set error state
+        fdcan_need_recover = true;
+      }
+      // re-enable notifications (include BUS_OFF)
+      HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE | FDCAN_IT_BUS_OFF, 0);
+      bupup();
+    }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -473,21 +528,21 @@ int main(void)
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Configure the main internal regulator output voltage
-  */
+   */
   HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
 
   /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
+   * in the RCC_OscInitTypeDef structure.
+   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -503,9 +558,8 @@ void SystemClock_Config(void)
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+   */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -551,6 +605,10 @@ void FDCAN_Init()
   {
     Error_Handler();
   }
+  // if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
+  // {
+  //   Error_Handler();
+  // }
 
   TxHeader.IdType = FDCAN_STANDARD_ID;
   TxHeader.TxFrameType = FDCAN_DATA_FRAME;
@@ -674,9 +732,9 @@ bool is_dc_on(void)
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -689,12 +747,12 @@ void Error_Handler(void)
 }
 #ifdef USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
+ * @brief  Reports the name of the source file and the source line number
+ *         where the assert_param error has occurred.
+ * @param  file: pointer to the source file name
+ * @param  line: assert_param error line source number
+ * @retval None
+ */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
