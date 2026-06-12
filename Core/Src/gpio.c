@@ -79,6 +79,12 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : EMERGENCY_BTN_Pin */
+  GPIO_InitStruct.Pin = EMERGENCY_BTN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(EMERGENCY_BTN_GPIO_Port, &GPIO_InitStruct);
+
   /*Configure GPIO pin : LED_BUILTIN_Pin */
   GPIO_InitStruct.Pin = LED_BUILTIN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
